@@ -40,7 +40,29 @@ public sealed class Database
     {
         using var conn = Open();
         conn.Exec(Schema);
+        UpgradeCustomers(conn);
         conn.Exec("INSERT OR IGNORE INTO counters(name, next_value) VALUES ('invoice', 1001), ('ticket', 1001)");
+    }
+
+    /// <summary>
+    /// Databases created before customers had separate name, address and phone fields get
+    /// the new columns, and each existing customer's name, address and phone are copied into them.
+    /// </summary>
+    private static void UpgradeCustomers(SqliteConnection conn)
+    {
+        var columns = conn.Query("PRAGMA table_info(customers)", r => r.Str("name"));
+        if (columns.Contains("last_name"))
+            return;
+        using var tx = conn.BeginTransaction();
+        foreach (var col in new[] { "last_name", "first_name", "address1", "address2", "city", "state", "zip" })
+            conn.Exec($"ALTER TABLE customers ADD COLUMN {col} TEXT NOT NULL DEFAULT ''");
+        var legacy = conn.Query("SELECT * FROM customers", CustomerRepository.Map);
+        foreach (var c in legacy)
+        {
+            c.Normalize();
+            CustomerRepository.Write(conn, c);
+        }
+        tx.Commit();
     }
 
     private const string Schema = """
@@ -62,8 +84,25 @@ public sealed class Database
             phone   TEXT NOT NULL DEFAULT '',
             email   TEXT NOT NULL DEFAULT '',
             address TEXT NOT NULL DEFAULT '',
-            notes   TEXT NOT NULL DEFAULT ''
+            notes   TEXT NOT NULL DEFAULT '',
+            last_name  TEXT NOT NULL DEFAULT '',
+            first_name TEXT NOT NULL DEFAULT '',
+            address1   TEXT NOT NULL DEFAULT '',
+            address2   TEXT NOT NULL DEFAULT '',
+            city       TEXT NOT NULL DEFAULT '',
+            state      TEXT NOT NULL DEFAULT '',
+            zip        TEXT NOT NULL DEFAULT ''
         );
+
+        CREATE TABLE IF NOT EXISTS customer_phones (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+            sort_order  INTEGER NOT NULL,
+            type        TEXT NOT NULL DEFAULT '',
+            number      TEXT NOT NULL,
+            note        TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS ix_customer_phones_customer ON customer_phones(customer_id);
 
         CREATE TABLE IF NOT EXISTS vehicles (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
